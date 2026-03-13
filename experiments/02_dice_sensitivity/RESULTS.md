@@ -1,41 +1,54 @@
 # Experiment 2: Dice Sensitivity Analysis
 
 ## Objective
-Measure how much the model's token preference and critic output change when the board is held fixed and only the dice channels are changed.
+Quantify how the policy and critic change across dice rolls, both globally and in tactical situations.
 
 ## Methodology
-- **States:** Collected **15** "interesting" decision states from corrected two-player random legal rollouts, biased toward positions with multiple tokens already out of base.
-- **Intervention:** For each state, cloned the spatial channels and swept the dice one-hot channels from roll `1` through `6`.
-- **Policy readout:** Disabled legal masking by using an all-ones mask, so the plot shows the model's raw preference over the four tokens.
-- **Value readout:** Recorded the value-head output for each roll.
+- **Global sample:** 300 decision states from random two-player rollouts.
+- **Curated buckets:** 200 states per bucket (50 for the rare `capture_roll_3_only` case).
+- **Masked + unmasked:** We run the dice sweep twice:
+  - **Unmasked**: raw preference (legal mask = all ones).
+  - **Masked**: legal mask recomputed per roll (what the model can actually play).
+- **Sensitivity metrics:** Pairwise JS divergence, roll-to-roll flips, entropy/top-prob by roll, and critic stability.
 
-## Results Visualization
+## Global Visualizations
 
-![Dice Sensitivity Results](./dice_sensitivity_results.png)
+![Global Unmasked Grid](./dice_sensitivity_global_unmasked_grid.png)
+![Global Unmasked Mean](./dice_sensitivity_global_unmasked_avg.png)
+![Global Masked Grid](./dice_sensitivity_global_masked_grid.png)
+![Global Masked Mean](./dice_sensitivity_global_masked_avg.png)
 
-## Aggregate Metrics From The Saved Rerun
+## Curated Visualizations
 
-- States whose preferred token changed across the six rolls: `11 / 15`
-- States whose preferred token changed specifically between roll `1` and roll `6`: `5 / 15`
-- Mean max policy probability on roll `6`: `0.639`
-- Mean max policy probability across rolls `1-5`: `0.432`
-- Mean per-state critic-score standard deviation across rolls: `0.056`
-- Mean per-state critic-score range across rolls: `0.166`
+Roll-based:
+- `roll_6`: `dice_sensitivity_roll_6_unmasked_avg.png`, `dice_sensitivity_roll_6_masked_avg.png`
+- `roll_3`: `dice_sensitivity_roll_3_unmasked_avg.png`, `dice_sensitivity_roll_3_masked_avg.png`
 
-## Key Findings
+Tactical buckets:
+- `capture_available`: `dice_sensitivity_capture_available_unmasked_avg.png`, `dice_sensitivity_capture_available_masked_avg.png`
+- `capture_roll_3_only`: `dice_sensitivity_capture_roll_3_only_unmasked_avg.png`, `dice_sensitivity_capture_roll_3_only_masked_avg.png`
+- `leading_token_in_danger`: `dice_sensitivity_leading_token_in_danger_unmasked_avg.png`, `dice_sensitivity_leading_token_in_danger_masked_avg.png`
+- `home_stretch_2plus`: `dice_sensitivity_home_stretch_2plus_unmasked_avg.png`, `dice_sensitivity_home_stretch_2plus_masked_avg.png`
 
-1. **Dice matters a lot for policy, and often changes the preferred token entirely.**
-   In this rerun, `11` of the `15` sampled states changed argmax token somewhere across the six dice values. The model is not using a single roll-agnostic token ranking.
+## Global Metrics (Key Numbers)
 
-2. **Roll `6` produces the sharpest decisions.**
-   The average top-token probability jumps from `0.432` on rolls `1-5` to `0.639` on roll `6`. That is strong evidence that the model has learned special-case behavior tied to sixes.
+Unmasked (raw preference):
+- `flip_any_roll`: `295 / 300`
+- `js_pairwise_mean`: `0.035`
+- `roll_topprob_mean` for roll 6: `0.525` (higher than rolls 1–5, which sit around `0.31–0.33`)
 
-3. **The critic is noticeably more stable than the policy.**
-   The value head does move with dice, but much less than the policy does. Across the 15 states, the average critic-score standard deviation across rolls is only `0.056`.
+Masked (legal moves enforced):
+- `flip_any_roll`: `205 / 300`
+- `js_pairwise_mean`: `0.139`
+- `roll_topprob_mean` for roll 6: `0.525` (still the strongest single-roll concentration)
 
-4. **Not all dice sensitivity is just "spawn on 6".**
-   Only `5 / 15` states changed preferred token specifically between roll `1` and roll `6`, while `11 / 15` changed somewhere across the full sweep. That suggests the model is also reacting to exact landing distances, not just the base-exit rule.
+## Curated Bucket Highlights
+
+- **Capture Available:** High JS and high flip rates in both masked and unmasked runs; dice sensitivity is strongest here, not just on roll 6.
+- **Capture Roll 3 Only:** Roll 3 dominates the masked view (`roll_topprob_mean` for roll 3 is the peak), showing the model’s preference sharpens when a specific roll unlocks a capture.
+- **Home Stretch 2+:** Masked policies become extremely confident on many rolls, with much higher JS divergence than the unmasked view. Late-game roll constraints matter.
+- **Leading Token In Danger:** Dice sensitivity increases for the masked policy; roll-to-roll policy flips happen in almost every state in this bucket.
 
 ## Notes
-- The value head output should be interpreted as a **critic score**, not a calibrated win probability.
-- These are raw policy preferences with masking disabled, so illegal-token mass can still appear in the chart when the model finds a token intrinsically appealing for a given roll.
+- The value head output is a **critic score**, not a calibrated win probability.
+- Full raw metrics and bucket counts are in `experiments/02_dice_sensitivity/dice_sensitivity_metrics.json`.
