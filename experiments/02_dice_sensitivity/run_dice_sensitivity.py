@@ -13,7 +13,13 @@ import matplotlib.pyplot as plt
 # Add the project root to the path so we can import src modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from experiments.common import advance_stuck_turn, load_checkpoint_model
+from experiments.common import (
+    advance_stuck_turn,
+    collect_states_stratified,
+    load_checkpoint_model,
+    PHASE_LABELS,
+    snapshot_state,
+)
 import td_ludo_cpp as ludo_cpp
 
 BASE_POS = -1
@@ -40,6 +46,12 @@ def parse_args():
         type=int,
         default=300,
         help="Number of random decision states for the global average.",
+    )
+    parser.add_argument(
+        "--per-phase-target",
+        type=int,
+        default=200,
+        help="Number of states per phase for stratified sampling.",
     )
     parser.add_argument(
         "--bucket-target",
@@ -76,6 +88,11 @@ def parse_args():
         action="store_true",
         help="Skip unmasked (raw preference) analysis.",
     )
+    parser.add_argument(
+        "--no-stratify",
+        action="store_true",
+        help="Fall back to old random sampling instead of stratified sampling.",
+    )
     return parser.parse_args()
 
 
@@ -90,15 +107,7 @@ def load_model(weights_path):
     return load_checkpoint_model(weights_path)
 
 
-def snapshot_state(game, state_tensor):
-    return {
-        "tensor": state_tensor.copy(),
-        "player_positions": np.array(game.player_positions, dtype=np.int8).copy(),
-        "scores": np.array(game.scores, dtype=np.int8).copy(),
-        "active_players": np.array(game.active_players, dtype=bool).copy(),
-        "current_player": int(game.current_player),
-        "current_dice_roll": int(game.current_dice_roll),
-    }
+# ── Local helpers that depend on ludo_cpp ─────────────────────────────────────
 
 
 def build_game_state(sample, roll_override=None):
@@ -207,6 +216,9 @@ def capture_rolls(sample):
     return rolls
 
 
+# ── Bucket definitions ────────────────────────────────────────────────────────
+
+
 def default_bucket_defs():
     return {
         "roll_6": lambda s: s["current_dice_roll"] == 6,
@@ -229,7 +241,10 @@ def default_bucket_targets(base_target):
     }
 
 
-def collect_states(
+# ── Legacy random collection (--no-stratify) ─────────────────────────────────
+
+
+def collect_states_random(
     num_games=100,
     max_steps=200,
     global_target=300,
@@ -239,7 +254,8 @@ def collect_states(
     max_loops=5000,
     seed=0,
 ):
-    print(f"Collecting {global_target} decision states...")
+    """Original random state collection (no stratification by game phase)."""
+    print(f"Collecting {global_target} decision states (random, no stratification)...")
     rng = np.random.default_rng(seed)
     env = ludo_cpp.VectorGameState(batch_size=num_games, two_player_mode=True)
 
@@ -326,6 +342,83 @@ def collect_states(
     return collected_samples, bucket_data
 
 
+# ── Bucket collection from an existing sample pool ───────────────────────────
+
+
+def collect_buckets_from_pool(
+    flat_samples,
+    bucket_defs,
+    bucket_targets,
+    sample_prob=0.3,
+    seed=0,
+):
+    """
+    Try to fill buckets by scanning an existing sample pool (e.g. stratified).
+
+    Returns bucket_data in the same format as collect_states_random.
+    """
+    rng = np.random.default_rng(seed + 99)
+    bucket_data = {name: {"samples": []} for name in bucket_defs}
+
+    for sample in flat_samples:
+        if rng.random() > sample_prob:
+            continue
+        for name, predicate in bucket_defs.items():
+            if len(bucket_data[name]["samples"]) >= bucket_targets.get(name, 0):
+                continue
+            if predicate(sample):
+                bucket_data[name]["samples"].append(sample)
+
+    return bucket_data
+
+
+def collect_buckets_extra(
+    bucket_defs,
+    bucket_targets,
+    existing_bucket_data,
+    num_games=100,
+    bucket_sample_prob=0.3,
+    max_loops=5000,
+    seed=0,
+):
+    """
+    Run an extra collection pass to fill any buckets that are still short
+    after scanning the stratified pool.
+    """
+    remaining = {}
+    remaining_targets = {}
+    for name in bucket_defs:
+        have = len(existing_bucket_data[name]["samples"])
+        want = bucket_targets.get(name, 0)
+        if have < want:
+            remaining[name] = bucket_defs[name]
+            remaining_targets[name] = want - have
+
+    if not remaining:
+        return existing_bucket_data
+
+    print(f"Running extra bucket collection for: {list(remaining.keys())}")
+    _, extra_bucket_data = collect_states_random(
+        num_games=num_games,
+        global_target=0,
+        bucket_defs=remaining,
+        bucket_targets=remaining_targets,
+        bucket_sample_prob=bucket_sample_prob,
+        max_loops=max_loops,
+        seed=seed + 200,
+    )
+
+    merged = {}
+    for name in bucket_defs:
+        merged[name] = {"samples": list(existing_bucket_data[name]["samples"])}
+        if name in extra_bucket_data:
+            merged[name]["samples"].extend(extra_bucket_data[name]["samples"])
+    return merged
+
+
+# ── Dice sweep core ──────────────────────────────────────────────────────────
+
+
 def legal_mask_for_roll(samples, roll):
     masks = np.zeros((len(samples), 4), dtype=np.float32)
     for idx, sample in enumerate(samples):
@@ -364,6 +457,9 @@ def run_dice_sweep(model, samples, masked=False):
         value_predictions[:, roll - 1] = value.squeeze(-1).numpy()
 
     return policy_distributions, value_predictions
+
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
 
 
 def entropy(p):
@@ -414,6 +510,9 @@ def compute_metrics(policy_distributions, value_predictions):
         "value_std_mean": float(value_std.mean()),
         "value_range_mean": float(value_range.mean()),
     }
+
+
+# ── Visualization ────────────────────────────────────────────────────────────
 
 
 def visualize_grid(policy_distributions, value_predictions, save_path, title):
@@ -497,6 +596,9 @@ def save_metrics(metrics, save_path):
     print(f"Saved metrics to {save_path}")
 
 
+# ── Analysis runner ──────────────────────────────────────────────────────────
+
+
 def run_analysis(model, samples, output_prefix, grid_states, masked, title_prefix):
     policy, value = run_dice_sweep(model, samples, masked=masked)
     metrics = compute_metrics(policy, value)
@@ -521,6 +623,9 @@ def run_analysis(model, samples, output_prefix, grid_states, masked, title_prefi
     return metrics
 
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+
 def main():
     args = parse_args()
     np.random.seed(args.seed)
@@ -528,22 +633,59 @@ def main():
     weights_path = resolve_weights_path(args.weights)
     model = load_model(weights_path)
 
+    output_dir = Path(__file__).resolve().parent
+    metrics = {"global": {}, "phases": {}, "buckets": {}}
+
     bucket_defs = {} if args.skip_buckets else default_bucket_defs()
     bucket_targets = {} if args.skip_buckets else default_bucket_targets(args.bucket_target)
 
-    samples, bucket_data = collect_states(
-        num_games=args.num_games,
-        max_steps=args.max_steps,
-        global_target=args.global_target,
-        bucket_defs=bucket_defs,
-        bucket_targets=bucket_targets,
-        bucket_sample_prob=args.bucket_sample_prob,
-        max_loops=args.max_loops,
-        seed=args.seed,
-    )
+    # ── Collect states ────────────────────────────────────────────────────
+    if args.no_stratify:
+        # Legacy random sampling path
+        samples, bucket_data = collect_states_random(
+            num_games=args.num_games,
+            max_steps=args.max_steps,
+            global_target=args.global_target,
+            bucket_defs=bucket_defs,
+            bucket_targets=bucket_targets,
+            bucket_sample_prob=args.bucket_sample_prob,
+            max_loops=args.max_loops,
+            seed=args.seed,
+        )
+        phase_bins = None
+    else:
+        # Stratified sampling: equal representation of early/mid/late
+        print("Using stratified sampling (early/mid/late phases)...")
+        phase_bins, samples = collect_states_stratified(
+            num_games=args.num_games,
+            per_phase_target=args.per_phase_target,
+            max_loops=args.max_loops,
+            seed=args.seed,
+        )
 
-    output_dir = Path(__file__).resolve().parent
-    metrics = {"global": {}, "buckets": {}}
+        # Fill buckets from the stratified pool first, then top up if needed
+        if bucket_defs:
+            bucket_data = collect_buckets_from_pool(
+                samples,
+                bucket_defs,
+                bucket_targets,
+                sample_prob=args.bucket_sample_prob,
+                seed=args.seed,
+            )
+            bucket_data = collect_buckets_extra(
+                bucket_defs,
+                bucket_targets,
+                bucket_data,
+                num_games=args.num_games,
+                bucket_sample_prob=args.bucket_sample_prob,
+                max_loops=args.max_loops,
+                seed=args.seed,
+            )
+        else:
+            bucket_data = {}
+
+    # ── Global analysis ───────────────────────────────────────────────────
+    print(f"\n=== Global dice sweep ({len(samples)} states) ===")
 
     if not args.skip_unmasked:
         metrics["global"]["unmasked"] = run_analysis(
@@ -565,6 +707,38 @@ def main():
             title_prefix="Global Dice Sensitivity (Masked)",
         )
 
+    # ── Per-phase analysis (stratified only) ──────────────────────────────
+    if phase_bins is not None:
+        for phase in PHASE_LABELS:
+            phase_samples = phase_bins[phase]
+            if not phase_samples:
+                print(f"Skipping phase '{phase}' - no samples collected.")
+                continue
+
+            print(f"\n=== Phase '{phase}' dice sweep ({len(phase_samples)} states) ===")
+            metrics["phases"][phase] = {}
+
+            if not args.skip_unmasked:
+                metrics["phases"][phase]["unmasked"] = run_analysis(
+                    model,
+                    phase_samples,
+                    str(output_dir / f"dice_sensitivity_phase_{phase}_unmasked"),
+                    min(args.grid_states, len(phase_samples)),
+                    masked=False,
+                    title_prefix=f"Phase '{phase}' Dice Sensitivity (Unmasked)",
+                )
+
+            if not args.skip_masked:
+                metrics["phases"][phase]["masked"] = run_analysis(
+                    model,
+                    phase_samples,
+                    str(output_dir / f"dice_sensitivity_phase_{phase}_masked"),
+                    min(args.grid_states, len(phase_samples)),
+                    masked=True,
+                    title_prefix=f"Phase '{phase}' Dice Sensitivity (Masked)",
+                )
+
+    # ── Bucket analysis ───────────────────────────────────────────────────
     if bucket_data:
         for name, data in bucket_data.items():
             bucket_samples = data["samples"]
@@ -572,7 +746,9 @@ def main():
                 print(f"Skipping bucket '{name}' - no samples collected.")
                 continue
 
+            print(f"\n=== Bucket '{name}' dice sweep ({len(bucket_samples)} states) ===")
             metrics["buckets"][name] = {}
+
             if not args.skip_unmasked:
                 metrics["buckets"][name]["unmasked"] = run_analysis(
                     model,

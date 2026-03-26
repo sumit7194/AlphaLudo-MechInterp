@@ -5,15 +5,20 @@ Measure which of the 128 channels actually fire meaningfully across many game
 states after each ResBlock. If many channels are near-zero on average, those
 channels can be pruned to shrink the model (~50% fewer params in conv layers).
 
+Uses phase-stratified sampling (early / mid / late game) to avoid the bias
+where random rollouts over-represent early-game states.
+
 Outputs:
   - Per-block mean/std activation magnitude for each channel
   - Histogram of channel utilization
   - Count of "dead" channels (mean activation < threshold)
+  - Per-phase dead channel analysis (channels alive in one phase but dead in another)
   - Pruning recommendation: how many channels could be removed
 
 Usage:
     python run_channel_activation.py
     python run_channel_activation.py --num-states 2000 --threshold 0.01
+    python run_channel_activation.py --no-stratify   # fall back to uniform random sampling
 """
 
 import argparse
@@ -32,7 +37,12 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from experiments.common import advance_stuck_turn, load_checkpoint_model
+from experiments.common import (
+    advance_stuck_turn,
+    load_checkpoint_model,
+    collect_states_stratified,
+    PHASE_LABELS,
+)
 import td_ludo_cpp as ludo_cpp
 
 
@@ -43,11 +53,12 @@ def parse_args():
         default="../../weights/model_latest_323k_shaped.pt",
         help="Path to the model checkpoint.",
     )
-    parser.add_argument("--num-states", type=int, default=1000, help="Number of game states to collect.")
+    parser.add_argument("--num-states", type=int, default=1000, help="Number of game states to collect (total across phases when stratified).")
     parser.add_argument("--num-games", type=int, default=100, help="Parallel games for state collection.")
-    parser.add_argument("--max-loops", type=int, default=3000, help="Max collection loops.")
+    parser.add_argument("--max-loops", type=int, default=5000, help="Max collection loops.")
     parser.add_argument("--threshold", type=float, default=0.01, help="Mean activation below this = near-dead channel.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--no-stratify", action="store_true", help="Disable phase-stratified sampling; use uniform random rollouts instead.")
     return parser.parse_args()
 
 
@@ -58,8 +69,11 @@ def resolve_weights_path(raw_path):
     return str((Path(__file__).resolve().parent / raw_path).resolve())
 
 
-def collect_states(num_games, num_states, max_loops, seed):
-    """Collect game state tensors by running random games."""
+# ── Legacy uniform collection (used with --no-stratify) ─────────────────────
+
+
+def collect_states_uniform(num_games, num_states, max_loops, seed):
+    """Collect game state tensors by running random games (uniform, no stratification)."""
     rng = np.random.default_rng(seed)
     env = ludo_cpp.VectorGameState(batch_size=num_games, two_player_mode=True)
 
@@ -100,8 +114,11 @@ def collect_states(num_games, num_states, max_loops, seed):
             if info["is_terminal"]:
                 env.reset_game(i)
 
-    print(f"Collected {len(collected)} game states.")
+    print(f"Collected {len(collected)} game states (uniform sampling).")
     return torch.tensor(np.array(collected[:num_states]), dtype=torch.float32)
+
+
+# ── Activation extraction & analysis (unchanged) ────────────────────────────
 
 
 def extract_activations(model, X, batch_size=256):
@@ -167,6 +184,9 @@ def analyze_activations(activations, threshold):
         })
 
     return block_stats
+
+
+# ── Visualizations (unchanged originals) ─────────────────────────────────────
 
 
 def visualize(block_stats, threshold, save_dir):
@@ -235,6 +255,178 @@ def visualize(block_stats, threshold, save_dir):
     print(f"Saved 4 visualizations to {save_dir}")
 
 
+# ── Per-phase analysis helpers ───────────────────────────────────────────────
+
+
+def run_per_phase_analysis(model, phase_samples, threshold):
+    """
+    Run activation extraction and analysis independently for each phase.
+
+    Returns:
+        phase_stats: dict  phase_label -> list[block_stat_dict]
+        phase_tensors: dict  phase_label -> tensor  (for reference)
+    """
+    phase_stats = {}
+    phase_tensors = {}
+
+    for phase in PHASE_LABELS:
+        samples = phase_samples[phase]
+        if len(samples) == 0:
+            print(f"  Phase '{phase}': no samples, skipping.")
+            continue
+
+        X_phase = torch.tensor(
+            np.stack([s["tensor"] for s in samples]), dtype=torch.float32
+        )
+        phase_tensors[phase] = X_phase
+
+        activations, _ = extract_activations(model, X_phase)
+        stats = analyze_activations(activations, threshold)
+        phase_stats[phase] = stats
+
+        dead_counts = [s["near_dead_count"] for s in stats]
+        print(f"  Phase '{phase}' ({len(samples)} states): dead channels per block = {dead_counts}")
+
+    return phase_stats, phase_tensors
+
+
+def compute_phase_differential(phase_stats, threshold):
+    """
+    Find channels that are dead in one phase but alive in another.
+
+    Returns a dict with:
+      - per_phase_dead: {phase: set of (block, channel) that are dead}
+      - dead_early_alive_late: set of (block, channel) dead in early but alive in late
+      - alive_early_dead_late: set of (block, channel) alive in early but dead in late
+      - phase_specific_dead: {phase: set of (block, channel) dead ONLY in that phase}
+      - universally_dead: set of (block, channel) dead in ALL phases
+    """
+    per_phase_dead = {}
+    for phase, stats in phase_stats.items():
+        dead_set = set()
+        for s in stats:
+            block_idx = s["block"]
+            dead_mask = s["channel_mean"] < threshold
+            for ch in np.where(dead_mask)[0]:
+                dead_set.add((block_idx, int(ch)))
+        per_phase_dead[phase] = dead_set
+
+    phases_present = [p for p in PHASE_LABELS if p in per_phase_dead]
+
+    # Universally dead: dead in ALL phases
+    if len(phases_present) == len(PHASE_LABELS):
+        universally_dead = per_phase_dead[phases_present[0]]
+        for p in phases_present[1:]:
+            universally_dead = universally_dead & per_phase_dead[p]
+    else:
+        universally_dead = set()
+
+    # Phase-specific dead: dead in exactly one phase, alive in all others
+    phase_specific_dead = {}
+    for phase in phases_present:
+        others = [p for p in phases_present if p != phase]
+        specific = per_phase_dead[phase].copy()
+        for other in others:
+            specific = specific - per_phase_dead[other]
+        phase_specific_dead[phase] = specific
+
+    # Early-dead / late-alive and vice versa
+    dead_early_alive_late = set()
+    alive_early_dead_late = set()
+    if "early" in per_phase_dead and "late" in per_phase_dead:
+        dead_early_alive_late = per_phase_dead["early"] - per_phase_dead["late"]
+        alive_early_dead_late = per_phase_dead["late"] - per_phase_dead["early"]
+
+    return {
+        "per_phase_dead": per_phase_dead,
+        "dead_early_alive_late": dead_early_alive_late,
+        "alive_early_dead_late": alive_early_dead_late,
+        "phase_specific_dead": phase_specific_dead,
+        "universally_dead": universally_dead,
+    }
+
+
+def print_phase_summary(diff, phase_stats, threshold):
+    """Print a human-readable summary of per-phase dead channel analysis."""
+    print(f"\n=== PER-PHASE DEAD CHANNEL ANALYSIS (threshold={threshold}) ===")
+
+    for phase in PHASE_LABELS:
+        if phase in diff["per_phase_dead"]:
+            count = len(diff["per_phase_dead"][phase])
+            print(f"  {phase:>5s} phase: {count} (block, channel) pairs dead")
+
+    print(f"\n  Universally dead (all phases): {len(diff['universally_dead'])}")
+    print(f"  Dead in early but alive in late: {len(diff['dead_early_alive_late'])}")
+    print(f"  Alive in early but dead in late: {len(diff['alive_early_dead_late'])}")
+
+    for phase in PHASE_LABELS:
+        if phase in diff["phase_specific_dead"]:
+            count = len(diff["phase_specific_dead"][phase])
+            print(f"  Dead ONLY in {phase}: {count}")
+
+    # Per-block breakdown for each phase
+    print(f"\n  Per-block dead channel counts by phase:")
+    header = f"  {'Block':>6s}"
+    for phase in PHASE_LABELS:
+        if phase in phase_stats:
+            header += f"  {phase:>6s}"
+    print(header)
+
+    if phase_stats:
+        num_blocks = len(next(iter(phase_stats.values())))
+        for b in range(num_blocks):
+            row = f"  {b:6d}"
+            for phase in PHASE_LABELS:
+                if phase in phase_stats:
+                    row += f"  {phase_stats[phase][b]['near_dead_count']:6d}"
+            print(row)
+
+
+def build_phase_metrics(phase_stats, diff):
+    """Build the per-phase section for the metrics JSON."""
+    phase_metrics = {}
+
+    for phase in PHASE_LABELS:
+        if phase not in phase_stats:
+            continue
+        stats = phase_stats[phase]
+        num_channels = stats[0]["total_channels"]
+        avg_across_blocks = np.mean([s["channel_mean"] for s in stats], axis=0)
+
+        phase_metrics[phase] = {
+            "num_states": int(stats[0]["channel_mean"].shape[0]) if False else "see_parent",
+            "per_block": [],
+        }
+        for s in stats:
+            phase_metrics[phase]["per_block"].append({
+                "block": s["block"],
+                "near_dead_count": s["near_dead_count"],
+                "channel_mean": s["channel_mean"].tolist(),
+                "channel_std": s["channel_std"].tolist(),
+                "channel_zero_frac": s["channel_zero_frac"].tolist(),
+                "channel_max": s["channel_max"].tolist(),
+            })
+        phase_metrics[phase]["globally_dead_channels"] = int(
+            (avg_across_blocks < diff.get("_threshold", 0.01)).sum()
+        ) if "_threshold" in diff else int(len(diff["per_phase_dead"].get(phase, set())))
+
+    # Differential summary
+    phase_metrics["differential"] = {
+        "universally_dead_count": len(diff["universally_dead"]),
+        "dead_early_alive_late_count": len(diff["dead_early_alive_late"]),
+        "alive_early_dead_late_count": len(diff["alive_early_dead_late"]),
+        "phase_specific_dead_counts": {
+            p: len(diff["phase_specific_dead"].get(p, set()))
+            for p in PHASE_LABELS
+        },
+    }
+
+    return phase_metrics
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+
 def main():
     args = parse_args()
     np.random.seed(args.seed)
@@ -242,9 +434,27 @@ def main():
     weights_path = resolve_weights_path(args.weights)
     model = load_checkpoint_model(weights_path)
 
-    X = collect_states(args.num_games, args.num_states, args.max_loops, args.seed)
+    # ── Collect states ───────────────────────────────────────────────────
+    phase_samples = None
 
-    print(f"Extracting activations from {len(model.res_blocks)} ResBlocks...")
+    if args.no_stratify:
+        print("Using uniform random sampling (--no-stratify).")
+        X = collect_states_uniform(args.num_games, args.num_states, args.max_loops, args.seed)
+    else:
+        per_phase_target = max(1, args.num_states // len(PHASE_LABELS))
+        print(f"Collecting ~{per_phase_target} states per phase ({len(PHASE_LABELS)} phases)...")
+        phase_samples, flat_samples = collect_states_stratified(
+            num_games=args.num_games,
+            per_phase_target=per_phase_target,
+            max_loops=args.max_loops,
+            seed=args.seed,
+        )
+        X = torch.tensor(
+            np.stack([s["tensor"] for s in flat_samples]), dtype=torch.float32
+        )
+
+    # ── Global activation analysis (all states combined) ─────────────────
+    print(f"Extracting activations from {len(model.res_blocks)} ResBlocks ({len(X)} states)...")
     activations, stem_activations = extract_activations(model, X)
 
     print(f"Analyzing channel activations (threshold={args.threshold})...")
@@ -254,7 +464,7 @@ def main():
     output_dir = Path(__file__).resolve().parent
     num_channels = block_stats[0]["total_channels"]
 
-    print(f"\n=== CHANNEL ACTIVATION SUMMARY ===")
+    print(f"\n=== CHANNEL ACTIVATION SUMMARY (global) ===")
     for s in block_stats:
         print(f"  Block {s['block']:2d}: {s['near_dead_count']:3d}/{num_channels} near-dead channels, "
               f"mean activation range [{s['channel_mean'].min():.4f}, {s['channel_mean'].max():.4f}]")
@@ -273,9 +483,19 @@ def main():
         param_reduction = 1 - (reduced / num_channels) ** 2  # rough: params ~ channels^2
         print(f"  Pruning to {reduced} channels would reduce conv params by ~{param_reduction * 100:.0f}%")
 
-    # Save metrics
+    # ── Per-phase analysis (stratified only) ─────────────────────────────
+    phase_metrics_section = None
+    if phase_samples is not None:
+        print(f"\n--- Per-phase activation analysis ---")
+        phase_stats, _ = run_per_phase_analysis(model, phase_samples, args.threshold)
+        diff = compute_phase_differential(phase_stats, args.threshold)
+        print_phase_summary(diff, phase_stats, args.threshold)
+        phase_metrics_section = build_phase_metrics(phase_stats, diff)
+
+    # ── Save metrics ─────────────────────────────────────────────────────
     metrics = {
         "num_states": int(len(X)),
+        "sampling": "stratified" if not args.no_stratify else "uniform",
         "threshold": args.threshold,
         "num_channels": num_channels,
         "num_blocks": len(block_stats),
@@ -292,6 +512,9 @@ def main():
             "channel_zero_frac": s["channel_zero_frac"].tolist(),
             "channel_max": s["channel_max"].tolist(),
         })
+
+    if phase_metrics_section is not None:
+        metrics["per_phase"] = phase_metrics_section
 
     with open(output_dir / "channel_activation_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)

@@ -13,12 +13,41 @@ import matplotlib.pyplot as plt
 # Add the project root to the path so we can import src modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from experiments.common import advance_stuck_turn, load_checkpoint_model
+from experiments.common import (
+    advance_stuck_turn,
+    collect_states_stratified,
+    load_checkpoint_model,
+    PHASE_LABELS,
+    snapshot_state,
+)
 import td_ludo_cpp as ludo_cpp
 
 BASE_POS = -1
 HOME_POS = 99
 SAFE_INDICES = {0, 8, 13, 21, 26, 34, 39, 47}
+
+CHANNEL_NAMES = [
+    "0: My Token 0",
+    "1: My Token 1",
+    "2: My Token 2",
+    "3: My Token 3",
+    "4: Opp Density",
+    "5: Safe Zones",
+    "6: My Home Path",
+    "7: Opp Home Path",
+    "8: Score Diff",
+    "9: My Locked %",
+    "10: Opp Locked %",
+    "11: Dice = 1",
+    "12: Dice = 2",
+    "13: Dice = 3",
+    "14: Dice = 4",
+    "15: Dice = 5",
+    "16: Dice = 6",
+]
+
+# All unique pairs of token channels (0-3)
+SWAP_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
 
 
 def parse_args():
@@ -40,6 +69,12 @@ def parse_args():
         type=int,
         default=500,
         help="Number of random decision states for the global average plot.",
+    )
+    parser.add_argument(
+        "--per-phase-target",
+        type=int,
+        default=200,
+        help="Number of states to collect per game phase (early/mid/late).",
     )
     parser.add_argument(
         "--bucket-target",
@@ -65,6 +100,16 @@ def parse_args():
         action="store_true",
         help="Skip curated bucket collection and run only the global average.",
     )
+    parser.add_argument(
+        "--no-stratify",
+        action="store_true",
+        help="Fall back to the old random (non-stratified) sampling.",
+    )
+    parser.add_argument(
+        "--skip-swap-test",
+        action="store_true",
+        help="Skip the channel swap test.",
+    )
     return parser.parse_args()
 
 
@@ -79,7 +124,9 @@ def load_model(weights_path):
     return load_checkpoint_model(weights_path)
 
 
-def snapshot_state(game, state_tensor):
+# ── Legacy helper (kept for snapshot inside bucket collection) ───────────────
+
+def _snapshot_state_local(game, state_tensor):
     return {
         "tensor": state_tensor.copy(),
         "player_positions": np.array(game.player_positions, dtype=np.int8).copy(),
@@ -89,6 +136,8 @@ def snapshot_state(game, state_tensor):
         "current_dice_roll": int(game.current_dice_roll),
     }
 
+
+# ── Bucket predicates ────────────────────────────────────────────────────────
 
 def build_game_state(sample, roll_override=None):
     state = ludo_cpp.GameState()
@@ -218,6 +267,8 @@ def default_bucket_targets(base_target):
     }
 
 
+# ── Legacy random collection (--no-stratify) ────────────────────────────────
+
 def collect_states(
     num_games=100,
     max_steps_per_game=200,
@@ -228,7 +279,7 @@ def collect_states(
     max_loops=5000,
     seed=0,
 ):
-    print(f"Collecting {global_target} random decision states...")
+    print(f"Collecting {global_target} random decision states (legacy mode)...")
     rng = np.random.default_rng(seed)
     env = ludo_cpp.VectorGameState(batch_size=num_games, two_player_mode=True)
 
@@ -293,7 +344,7 @@ def collect_states(
                     len(bucket_data[name]["states"]) < bucket_targets.get(name, 0)
                     for name in bucket_defs
                 ):
-                    sample = snapshot_state(game, states_tensor[i])
+                    sample = _snapshot_state_local(game, states_tensor[i])
                     for name, predicate in bucket_defs.items():
                         if len(bucket_data[name]["states"]) >= bucket_targets.get(name, 0):
                             continue
@@ -331,6 +382,111 @@ def collect_states(
     return X, masks, bucket_data
 
 
+# ── Bucket-only collection pass ──────────────────────────────────────────────
+
+def collect_buckets_only(
+    bucket_defs,
+    bucket_targets,
+    num_games=100,
+    bucket_sample_prob=0.3,
+    max_loops=5000,
+    seed=42,
+):
+    """Collect bucket samples in a separate pass (predicates differ from phase stratification)."""
+    print("Collecting curated bucket states...")
+    rng = np.random.default_rng(seed)
+    env = ludo_cpp.VectorGameState(batch_size=num_games, two_player_mode=True)
+
+    bucket_data = {
+        name: {"states": [], "masks": []} for name in bucket_defs.keys()
+    }
+
+    loop_count = 0
+    while loop_count < max_loops:
+        loop_count += 1
+        if loop_count % 200 == 0:
+            bucket_summary = ", ".join(
+                f"{name}:{len(data['states'])}/{bucket_targets.get(name, 0)}"
+                for name, data in bucket_data.items()
+            )
+            print(f"  ...loop {loop_count}, buckets [{bucket_summary}]")
+
+        for i in range(num_games):
+            game = env.get_game(i)
+            if not game.is_terminal and game.current_dice_roll == 0:
+                game.current_dice_roll = int(rng.integers(1, 7))
+
+        legal_moves_batch = env.get_legal_moves()
+        states_tensor = env.get_state_tensor()
+
+        actions = []
+        for i in range(num_games):
+            moves = legal_moves_batch[i]
+            game = env.get_game(i)
+
+            if game.is_terminal:
+                actions.append(-1)
+                continue
+            if not moves:
+                advance_stuck_turn(game)
+                actions.append(-1)
+                continue
+
+            action = int(rng.choice(moves))
+            actions.append(action)
+
+            if rng.random() < bucket_sample_prob:
+                if any(
+                    len(bucket_data[name]["states"]) < bucket_targets.get(name, 0)
+                    for name in bucket_defs
+                ):
+                    mask = np.zeros(4, dtype=np.float32)
+                    for m in moves:
+                        mask[m] = 1.0
+                    sample = _snapshot_state_local(game, states_tensor[i])
+                    for name, predicate in bucket_defs.items():
+                        if len(bucket_data[name]["states"]) >= bucket_targets.get(name, 0):
+                            continue
+                        if predicate(sample):
+                            bucket_data[name]["states"].append(states_tensor[i].copy())
+                            bucket_data[name]["masks"].append(mask)
+
+        _, _, _, infos = env.step(actions)
+        for i, info in enumerate(infos):
+            if info["is_terminal"]:
+                env.reset_game(i)
+
+        if all(
+            len(bucket_data[name]["states"]) >= bucket_targets.get(name, 0)
+            for name in bucket_defs
+        ):
+            break
+
+    if loop_count >= max_loops:
+        print("Reached max collection loops before filling all bucket targets.")
+        for name, data in bucket_data.items():
+            target = bucket_targets.get(name, 0)
+            if len(data["states"]) < target:
+                print(f"  Bucket '{name}' has {len(data['states'])}/{target} samples.")
+
+    return bucket_data
+
+
+# ── Helpers to convert sample lists -> tensors ───────────────────────────────
+
+def samples_to_tensors(samples):
+    """Convert a list of sample dicts (from collect_states_stratified) to (X, masks) tensors."""
+    X = torch.tensor(
+        np.array([s["tensor"] for s in samples]), dtype=torch.float32
+    )
+    masks = torch.tensor(
+        np.array([s["legal_mask"] for s in samples]), dtype=torch.float32
+    )
+    return X, masks
+
+
+# ── Core experiment functions ────────────────────────────────────────────────
+
 def kl_divergence(p, q):
     # p and q are batches of probability distributions (B, 4)
     eps = 1e-8
@@ -366,35 +522,47 @@ def run_ablation(model, X, masks):
     return policy_kl_impacts, value_mae_impacts
 
 
+def run_swap_test(model, X, masks):
+    """
+    Swap pairs of token channels and measure policy KL divergence.
+
+    If the model is truly biased toward "Token 0" (channel index), swapping
+    channels 0 and 2 should move the preference to follow the channel, not
+    the spatial position.  This distinguishes spatial-position sensitivity
+    from channel-index sensitivity.
+    """
+    print("Running swap test on token channels...")
+    with torch.no_grad():
+        baseline_policy, _ = model(X, masks)
+
+    results = {}
+    for a, b in SWAP_PAIRS:
+        X_swapped = X.clone()
+        X_swapped[:, a, :, :] = X[:, b, :, :]
+        X_swapped[:, b, :, :] = X[:, a, :, :]
+
+        with torch.no_grad():
+            swapped_policy, _ = model(X_swapped, masks)
+
+        kl = kl_divergence(baseline_policy, swapped_policy).mean().item()
+        label = f"swap_{a}_{b}"
+        results[label] = kl
+        print(f"  Swap {a}<->{b} -> Policy KL: {kl:.4f}")
+
+    return results
+
+
+# ── Visualization ────────────────────────────────────────────────────────────
+
 def visualize(policy_impacts, value_impacts, save_path, title_suffix=""):
     print(f"Generating visualization at {save_path}...")
 
-    channel_names = [
-        "0: My Token 0",
-        "1: My Token 1",
-        "2: My Token 2",
-        "3: My Token 3",
-        "4: Opp Density",
-        "5: Safe Zones",
-        "6: My Home Path",
-        "7: Opp Home Path",
-        "8: Score Diff",
-        "9: My Locked %",
-        "10: Opp Locked %",
-        "11: Dice = 1",
-        "12: Dice = 2",
-        "13: Dice = 3",
-        "14: Dice = 4",
-        "15: Dice = 5",
-        "16: Dice = 6",
-    ]
-
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-    y_pos = np.arange(len(channel_names))
+    y_pos = np.arange(len(CHANNEL_NAMES))
 
     ax1.barh(y_pos, policy_impacts, align="center", color="skyblue")
     ax1.set_yticks(y_pos)
-    ax1.set_yticklabels(channel_names)
+    ax1.set_yticklabels(CHANNEL_NAMES)
     ax1.invert_yaxis()
     ax1.set_xlabel("Average KL Divergence")
     ax1.set_title(f"Impact on Policy Decision{title_suffix}")
@@ -402,11 +570,35 @@ def visualize(policy_impacts, value_impacts, save_path, title_suffix=""):
 
     ax2.barh(y_pos, value_impacts, align="center", color="salmon")
     ax2.set_yticks(y_pos)
-    ax2.set_yticklabels(channel_names)
+    ax2.set_yticklabels(CHANNEL_NAMES)
     ax2.invert_yaxis()
     ax2.set_xlabel("Average Absolute Critic Shift")
     ax2.set_title(f"Impact on Critic Output{title_suffix}")
     ax2.grid(axis="x", linestyle="--", alpha=0.7)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print("Done!")
+
+
+def visualize_swap(swap_results, save_path):
+    """Bar chart of swap-test KL divergences."""
+    print(f"Generating swap test visualization at {save_path}...")
+    labels = list(swap_results.keys())
+    values = [swap_results[k] for k in labels]
+
+    # Nicer display labels
+    display_labels = [l.replace("swap_", "").replace("_", " <-> ") for l in labels]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x_pos = np.arange(len(labels))
+    ax.bar(x_pos, values, color="mediumpurple")
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(display_labels)
+    ax.set_ylabel("Policy KL Divergence")
+    ax.set_title("Channel Swap Test (Token Channels)")
+    ax.grid(axis="y", linestyle="--", alpha=0.7)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -420,6 +612,8 @@ def save_metrics(metrics, save_path):
     print(f"Saved metrics to {save_path}")
 
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 def main():
     args = parse_args()
     np.random.seed(args.seed)
@@ -427,29 +621,66 @@ def main():
     weights_path = resolve_weights_path(args.weights)
     model = load_model(weights_path)
 
-    bucket_defs = {} if args.skip_buckets else default_bucket_defs()
-    bucket_targets = {} if args.skip_buckets else default_bucket_targets(args.bucket_target)
-
-    X, masks, bucket_data = collect_states(
-        num_games=args.num_games,
-        max_steps_per_game=args.max_steps,
-        global_target=args.global_target,
-        bucket_defs=bucket_defs,
-        bucket_targets=bucket_targets,
-        bucket_sample_prob=args.bucket_sample_prob,
-        max_loops=args.max_loops,
-        seed=args.seed,
-    )
-
+    output_dir = Path(__file__).resolve().parent
     metrics = {}
+
+    # ── State collection ─────────────────────────────────────────────────
+    if args.no_stratify:
+        # Legacy path: uniform random sampling (dominated by early-game)
+        bucket_defs = {} if args.skip_buckets else default_bucket_defs()
+        bucket_targets = {} if args.skip_buckets else default_bucket_targets(args.bucket_target)
+
+        X, masks, bucket_data = collect_states(
+            num_games=args.num_games,
+            max_steps_per_game=args.max_steps,
+            global_target=args.global_target,
+            bucket_defs=bucket_defs,
+            bucket_targets=bucket_targets,
+            bucket_sample_prob=args.bucket_sample_prob,
+            max_loops=args.max_loops,
+            seed=args.seed,
+        )
+        phase_bins = None
+    else:
+        # Stratified sampling: equal representation of early/mid/late phases
+        # Use require_multi_legal=True so we only ablate token channels in
+        # states where >=2 tokens are legal (avoids "remove the only option").
+        print("Collecting stratified states (require_multi_legal=True)...")
+        phase_bins, flat_samples = collect_states_stratified(
+            num_games=args.num_games,
+            per_phase_target=args.per_phase_target,
+            max_loops=args.max_loops,
+            seed=args.seed,
+            require_multi_legal=True,
+        )
+        X, masks = samples_to_tensors(flat_samples)
+
+        # Separate bucket collection pass (bucket predicates differ from phases)
+        if args.skip_buckets:
+            bucket_data = {}
+        else:
+            bucket_defs = default_bucket_defs()
+            bucket_targets = default_bucket_targets(args.bucket_target)
+            bucket_data = collect_buckets_only(
+                bucket_defs=bucket_defs,
+                bucket_targets=bucket_targets,
+                num_games=args.num_games,
+                bucket_sample_prob=args.bucket_sample_prob,
+                max_loops=args.max_loops,
+                seed=args.seed + 1,  # different seed to avoid duplicate states
+            )
+
+    # ── Global ablation ──────────────────────────────────────────────────
+    print(f"\n=== Global ablation ({len(X)} samples) ===")
     p_impact, v_impact = run_ablation(model, X, masks)
     metrics["global"] = {
         "num_samples": int(len(X)),
         "policy_kl": p_impact,
         "critic_mae": v_impact,
+        "stratified": not args.no_stratify,
+        "require_multi_legal": not args.no_stratify,
     }
 
-    output_dir = Path(__file__).resolve().parent
     visualize(
         p_impact,
         v_impact,
@@ -457,6 +688,45 @@ def main():
         title_suffix=" (Global)",
     )
 
+    # ── Per-phase ablation (stratified only) ─────────────────────────────
+    if phase_bins is not None:
+        metrics["phases"] = {}
+        for phase in PHASE_LABELS:
+            samples = phase_bins[phase]
+            if not samples:
+                print(f"Skipping phase '{phase}' - no samples collected.")
+                continue
+            X_phase, masks_phase = samples_to_tensors(samples)
+            print(f"\n=== Phase '{phase}' ablation ({len(X_phase)} samples) ===")
+            p_phase, v_phase = run_ablation(model, X_phase, masks_phase)
+            metrics["phases"][phase] = {
+                "num_samples": int(len(X_phase)),
+                "policy_kl": p_phase,
+                "critic_mae": v_phase,
+            }
+            save_path = output_dir / f"channel_ablation_results_phase_{phase}.png"
+            visualize(p_phase, v_phase, save_path, title_suffix=f" (Phase: {phase})")
+
+    # ── Swap test ────────────────────────────────────────────────────────
+    if not args.skip_swap_test:
+        print(f"\n=== Swap test ({len(X)} samples) ===")
+        swap_results = run_swap_test(model, X, masks)
+        metrics["swap_test"] = swap_results
+        visualize_swap(swap_results, output_dir / "channel_ablation_swap_test.png")
+
+        # Per-phase swap test
+        if phase_bins is not None:
+            metrics["swap_test_phases"] = {}
+            for phase in PHASE_LABELS:
+                samples = phase_bins[phase]
+                if not samples:
+                    continue
+                X_phase, masks_phase = samples_to_tensors(samples)
+                print(f"\n=== Swap test phase '{phase}' ({len(X_phase)} samples) ===")
+                swap_phase = run_swap_test(model, X_phase, masks_phase)
+                metrics["swap_test_phases"][phase] = swap_phase
+
+    # ── Bucket ablation ──────────────────────────────────────────────────
     if bucket_data:
         metrics["buckets"] = {}
         for name, data in bucket_data.items():
@@ -465,7 +735,7 @@ def main():
                 continue
             X_bucket = torch.tensor(np.array(data["states"]), dtype=torch.float32)
             masks_bucket = torch.tensor(np.array(data["masks"]), dtype=torch.float32)
-            print(f"Running ablation for bucket '{name}' with {len(X_bucket)} samples...")
+            print(f"\n=== Bucket '{name}' ablation ({len(X_bucket)} samples) ===")
             p_bucket, v_bucket = run_ablation(model, X_bucket, masks_bucket)
             metrics["buckets"][name] = {
                 "num_samples": int(len(X_bucket)),

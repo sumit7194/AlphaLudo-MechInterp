@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -15,12 +16,19 @@ from sklearn.preprocessing import StandardScaler
 # Add the project root to the path so we can import src modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from experiments.common import advance_stuck_turn, load_checkpoint_model
+from experiments.common import (
+    advance_stuck_turn,
+    load_checkpoint_model,
+    game_phase,
+    count_tokens_out,
+    BASE_POS,
+    HOME_POS,
+)
 import td_ludo_cpp as ludo_cpp
 
-BASE_POS = -1
-HOME_POS = 99
 SAFE_INDICES = {0, 8, 13, 21, 26, 34, 39, 47}
+PHASE_LABELS = ("early", "mid", "late")
+PHASE_TO_INT = {"early": 0, "mid": 1, "late": 2}
 
 
 def parse_args():
@@ -48,6 +56,11 @@ def parse_args():
     parser.add_argument("--device", default="cpu", help="Torch device for feature extraction.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--skip-plot", action="store_true", help="Skip saving the summary figure.")
+    parser.add_argument(
+        "--no-stratify",
+        action="store_true",
+        help="Disable phase stratification (use raw collection order, original behavior).",
+    )
     return parser.parse_args()
 
 
@@ -179,6 +192,8 @@ def compute_labels(samples):
         "home_stretch_count": np.array([home_stretch_count(sample) for sample in samples]),
         "eventual_win": np.array([sample["eventual_win"] for sample in samples]),
         "closest_token_to_home": np.array([closest_token_to_home(sample) for sample in samples]),
+        "game_phase": np.array([PHASE_TO_INT[game_phase(sample)] for sample in samples]),
+        "num_tokens_out": np.array([count_tokens_out(sample) for sample in samples]),
     }
 
     for concept, values in labels.items():
@@ -189,12 +204,52 @@ def compute_labels(samples):
     return labels
 
 
+def stratify_samples(samples, target_states, rng):
+    """Stratify samples to have equal representation of early/mid/late game phases.
+
+    Returns a list of samples with balanced phase distribution, up to target_states.
+    """
+    # Bin samples by phase
+    phase_bins = {p: [] for p in PHASE_LABELS}
+    for sample in samples:
+        phase = game_phase(sample)
+        phase_bins[phase].append(sample)
+
+    # Report pre-stratification distribution
+    raw_counts = {p: len(phase_bins[p]) for p in PHASE_LABELS}
+    total_raw = sum(raw_counts.values())
+    print(f"  Pre-stratification phase distribution ({total_raw} total):")
+    for p in PHASE_LABELS:
+        pct = 100.0 * raw_counts[p] / total_raw if total_raw > 0 else 0
+        print(f"    {p}: {raw_counts[p]} ({pct:.1f}%)")
+
+    # Equal count per phase, capped so total <= target_states
+    per_phase = min(len(phase_bins[p]) for p in PHASE_LABELS)
+    per_phase = min(per_phase, target_states // 3)
+
+    stratified = []
+    for p in PHASE_LABELS:
+        rng.shuffle(phase_bins[p])
+        stratified.extend(phase_bins[p][:per_phase])
+    rng.shuffle(stratified)
+
+    # Report post-stratification distribution
+    post_counts = Counter(game_phase(s) for s in stratified)
+    print(f"  Post-stratification phase distribution ({len(stratified)} total):")
+    for p in PHASE_LABELS:
+        pct = 100.0 * post_counts[p] / len(stratified) if stratified else 0
+        print(f"    {p}: {post_counts[p]} ({pct:.1f}%)")
+
+    return stratified
+
+
 def collect_labeled_dataset(
     num_games=100,
     target_states=2500,
     sample_prob=0.5,
     max_episode_steps=512,
     seed=0,
+    stratify=True,
 ):
     print(f"Collecting {target_states} labeled states from finished games...")
     rng = np.random.default_rng(seed)
@@ -204,8 +259,11 @@ def collect_labeled_dataset(
     finalized_samples = []
     episode_steps = np.zeros(num_games, dtype=int)
 
+    # Over-collect when stratifying so we have enough in every phase bin
+    raw_target = target_states * 3 if stratify else target_states
+
     loop_count = 0
-    while len(finalized_samples) < target_states:
+    while len(finalized_samples) < raw_target:
         loop_count += 1
         if loop_count % 100 == 0:
             print(f"  ...loop {loop_count}, finalized {len(finalized_samples)}")
@@ -256,9 +314,16 @@ def collect_labeled_dataset(
                 env.reset_game(game_idx)
                 episode_steps[game_idx] = 0
 
-    samples = finalized_samples[:target_states]
-    X = torch.tensor(np.stack([sample["tensor"] for sample in samples]), dtype=torch.float32)
+    if stratify:
+        samples = stratify_samples(finalized_samples, target_states, rng)
+    else:
+        samples = finalized_samples[:target_states]
+
+    # Report class balance for each probe target
+    print("Class distribution after final selection:")
     labels = compute_labels(samples)
+
+    X = torch.tensor(np.stack([sample["tensor"] for sample in samples]), dtype=torch.float32)
     print(f"Collected {len(samples)} states with tensor shape {tuple(X.shape)}")
     return X, labels
 
@@ -394,6 +459,7 @@ def main():
         sample_prob=args.sample_prob,
         max_episode_steps=args.max_episode_steps,
         seed=args.seed,
+        stratify=not args.no_stratify,
     )
 
     features = extract_features(
