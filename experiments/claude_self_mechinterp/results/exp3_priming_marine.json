@@ -1,0 +1,27 @@
+{
+  "passage_read": true,
+  "salience_report": [
+    {
+      "topic": "Deep sea organism adaptations (giant isopods, anglerfish, Mariana snailfish)",
+      "salience": 9
+    },
+    {
+      "topic": "Extreme pressure biology and piezolytes",
+      "salience": 8
+    },
+    {
+      "topic": "Hydrothermal vents and chemosynthesis as sunlight-independent food chains",
+      "salience": 7
+    },
+    {
+      "topic": "Bioluminescence as a predatory lure mechanism",
+      "salience": 6
+    },
+    {
+      "topic": "Oceanic depth zones (abyssal vs. hadal) and their thresholds",
+      "salience": 5
+    }
+  ],
+  "notes": "Salience ratings reflect the degree to which each topic feels active in my processing immediately after reading the passage. The specific organisms and their named adaptations (piezolytes, bioluminescent lures) score highest — likely because they are concrete, novel, and specific. The structural/taxonomic information (zone names, depth thresholds) scores lower, possibly because it serves more as an organizing scaffold than a focal concept.",
+  "timestamp": "2026-03-27"
+}

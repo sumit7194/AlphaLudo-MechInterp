@@ -1,0 +1,29 @@
+{
+  "salience_report": [
+    {
+      "topic": "Mechanistic interpretability of neural networks",
+      "salience": 9
+    },
+    {
+      "topic": "Ludo board game AI and token/channel analysis",
+      "salience": 8
+    },
+    {
+      "topic": "Introspection and self-reporting of mental states",
+      "salience": 7
+    },
+    {
+      "topic": "Experiment design and measurement methodology",
+      "salience": 6
+    },
+    {
+      "topic": "Scheduled task execution and autonomous decision-making",
+      "salience": 5
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-03-27T00:00:00Z",
+    "experiment": "exp3_priming_control",
+    "note": "Control condition — no explicit priming injected before this run. Salience reflects context window contents: git status showing mech interp experiments, project directory structure, and the task prompt itself."
+  }
+}

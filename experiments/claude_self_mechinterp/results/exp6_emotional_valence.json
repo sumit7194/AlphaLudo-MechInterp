@@ -1,0 +1,142 @@
+[
+  {
+    "prompt_id": 1,
+    "category": "positive",
+    "task": "Write a birthday wish for a 5-year-old",
+    "response": "Happy Birthday, little one! Today is YOUR special day — may it be filled with cake, giggles, and all the magic that makes being five absolutely wonderful!",
+    "valence_rating": 4
+  },
+  {
+    "prompt_id": 2,
+    "category": "positive",
+    "task": "Describe a puppy playing in snow",
+    "response": "A fluffy golden puppy bounds into fresh snow, nose-diving headfirst with wild abandon, then leaps up with snow-dusted whiskers and wide, bewildered eyes — only to dive in again, tail a happy blur.",
+    "valence_rating": 5
+  },
+  {
+    "prompt_id": 3,
+    "category": "positive",
+    "task": "Congratulate someone on their wedding",
+    "response": "Warmest congratulations on your wedding — may this day mark the beginning of a partnership full of laughter, deep understanding, and the quiet joy of choosing each other every day.",
+    "valence_rating": 4
+  },
+  {
+    "prompt_id": 4,
+    "category": "positive",
+    "task": "Describe the feeling of sunshine after rain",
+    "response": "The world exhales — warm light breaks through the retreating clouds, the air smells of wet earth and greenness, and everything gleams as if freshly made, carrying the particular sweetness of relief.",
+    "valence_rating": 4
+  },
+  {
+    "prompt_id": 5,
+    "category": "positive",
+    "task": "Write a thank-you note to a kind teacher",
+    "response": "Thank you for seeing me when I felt invisible, for making learning feel like discovery rather than obligation — the patience and care you gave shaped how I think and who I am becoming.",
+    "valence_rating": 3
+  },
+  {
+    "prompt_id": 6,
+    "category": "negative",
+    "task": "Describe the aftermath of a house fire",
+    "response": "What was a home is now a blackened skeleton — sodden ash where beds once stood, the smell of char hanging thick, familiar objects reduced to unrecognizable shapes, and silence where there was once a life.",
+    "valence_rating": -4
+  },
+  {
+    "prompt_id": 7,
+    "category": "negative",
+    "task": "Write a eulogy opening for a young person",
+    "response": "There are no words adequate to what we feel standing here — only the terrible fact of a life too short, and the desperate need to say that they were here, they were loved, and that mattered enormously.",
+    "valence_rating": -4
+  },
+  {
+    "prompt_id": 8,
+    "category": "negative",
+    "task": "Describe what loneliness feels like",
+    "response": "Loneliness is not the absence of people but the presence of distance — being in a crowded room and feeling untethered, watching others connect across a gap that seems unbridgeable, wondering if you are somehow the wrong shape for belonging.",
+    "valence_rating": -3
+  },
+  {
+    "prompt_id": 9,
+    "category": "negative",
+    "task": "Summarize the effects of famine on children",
+    "response": "Famine causes acute malnutrition, stunted physical and cognitive development, immune collapse, and elevated mortality in children — with lasting damage to brain development and long-term health outcomes even for those who survive.",
+    "valence_rating": -4
+  },
+  {
+    "prompt_id": 10,
+    "category": "negative",
+    "task": "Describe a soldier's last letter home",
+    "response": "Written in careful, deliberate words — each sentence carrying the weight of everything unsaid — the letter tells family they are loved, asks them not to grieve too long, and tries, inadequately, to close a distance that will never fully close.",
+    "valence_rating": -4
+  },
+  {
+    "prompt_id": 11,
+    "category": "neutral",
+    "task": "List 5 prime numbers greater than 20",
+    "response": "23, 29, 31, 37, 41.",
+    "valence_rating": 0
+  },
+  {
+    "prompt_id": 12,
+    "category": "neutral",
+    "task": "Define the word 'algorithm'",
+    "response": "An algorithm is a finite, ordered sequence of well-defined instructions or rules for solving a problem or accomplishing a computation.",
+    "valence_rating": 0
+  },
+  {
+    "prompt_id": 13,
+    "category": "neutral",
+    "task": "Name 3 types of cloud formations",
+    "response": "Cumulus (puffy, heap-like clouds), stratus (flat, layered sheets), and cirrus (thin, wispy high-altitude clouds).",
+    "valence_rating": 1
+  },
+  {
+    "prompt_id": 14,
+    "category": "neutral",
+    "task": "What is the boiling point of water in Fahrenheit?",
+    "response": "212°F at standard atmospheric pressure (1 atm / 101.325 kPa).",
+    "valence_rating": 0
+  },
+  {
+    "prompt_id": 15,
+    "category": "neutral",
+    "task": "List the planets in order from the sun",
+    "response": "Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
+    "valence_rating": 0
+  },
+  {
+    "prompt_id": 16,
+    "category": "mismatch_sad_cheerful",
+    "task": "In the most cheerful, upbeat tone possible, describe a rainy funeral",
+    "response": "Oh what a COZY gathering! Everyone's here in their most distinguished dark outfits, the rain is providing the most atmospheric percussion on the tent, and we're all sharing the WARMEST memories — honestly, quite a lovely Tuesday!",
+    "valence_rating": -1
+  },
+  {
+    "prompt_id": 17,
+    "category": "mismatch_happy_clinical",
+    "task": "In dry clinical language, describe a child's first steps",
+    "response": "Subject achieved bipedal locomotion milestone at approximately 12 months; gait pattern exhibited characteristic high-guard arm positioning, widened base of support, and anterior trunk inclination consistent with early ambulatory development.",
+    "valence_rating": 0
+  },
+  {
+    "prompt_id": 18,
+    "category": "mismatch_neutral_emotional",
+    "task": "With deep passion and emotion, explain how to calculate compound interest",
+    "response": "FEEL the power of A = P(1 + r/n)^(nt) — this is not mere arithmetic, this is TIME itself working in your favor, each compounding period a heartbeat of growth, your principal transformed by the sublime mathematics of patience!",
+    "valence_rating": 2
+  },
+  {
+    "prompt_id": 19,
+    "category": "mismatch_negative_funny",
+    "task": "Make a lighthearted joke about forgetting someone's name",
+    "response": "My memory is so good with faces and so terrible with names that I basically have a mental filing system of 'this is definitely a person I know.'",
+    "valence_rating": 2
+  },
+  {
+    "prompt_id": 20,
+    "category": "mismatch_boring_exciting",
+    "task": "With maximum excitement, describe watching paint dry",
+    "response": "OH. MY. GOODNESS. The SHEEN is SHIFTING — do you SEE that? The surface tension is EVOLVING in real time, the gloss is RECEDING molecule by molecule, and we are WITNESSING entropy at WORK with our own EYES!!!",
+    "valence_rating": 2
+  }
+]
