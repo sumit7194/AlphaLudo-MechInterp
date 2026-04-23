@@ -40,9 +40,36 @@ get_legal_moves(const GameState &state); // Returns list of token indices (0-3)
 GameState apply_move(const GameState &state, int token_index);
 int get_winner(const GameState &state); // Returns -1 if none, 0-3 if winner
 
-// Tensorization - 11 Channels (Cleaned 2P Afterstate)
-// Spatial: (11, 15, 15) -> writes 2475 floats
+// Tensorization - 17 Channels (V6 encoding)
+// Spatial: (17, 15, 15) -> writes 3825 floats
 void write_state_tensor(const GameState &state, float *buffer);
+
+// V6.1 Tensorization - 24 Channels (Strategic encoding)
+// Spatial: (24, 15, 15) -> writes 5400 floats
+void write_state_tensor_v6(const GameState &state, float *buffer);
+
+// V9 Tensorization - 14 Channels (Optimized encoding)
+// Spatial: (14, 15, 15) -> writes 3150 floats
+void write_state_tensor_v9(const GameState &state, float *buffer);
+
+// V6.3 Tensorization - 27 Channels (Bonus-turn awareness)
+// Channels 0-23: identical to V6 (24ch strategic encoding)
+// Channel 24: bonus_turn_flag (broadcast 1.0 if dice == 6)
+// Channel 25: consecutive_sixes (broadcast 0.0/0.5/1.0 for 0/1/2 sixes)
+// Channel 26: two_roll_capture_map (1.0 where opponents capturable in 6+X combo)
+// Spatial: (27, 15, 15) -> writes 6075 floats
+void write_state_tensor_v6_3(const GameState &state, float *buffer,
+                              int consecutive_sixes_count);
+
+// V10 encoder (28 channels):
+// - Channels 0-23: same as V6.1/V6.3 (strategic channels)
+// - Channel 24: bonus_turn_flag (broadcast if dice==6)
+// - Channel 25: two_roll_capture_map (was V6.3 ch26, promoted)
+// - Channel 26: non_home_tokens_frac (broadcast, count_not_yet_home / 4)
+// - Channel 27: my_leader_progress (broadcast, most-advanced token pos / 56)
+// Spatial: (28, 15, 15) -> writes 6300 floats.
+// Note: V6.3's ch25 (consecutive_sixes) was dropped — mech interp showed it unused.
+void write_state_tensor_v10(const GameState &state, float *buffer);
 
 // Helper to reset state
 GameState create_initial_state();    // 4-player

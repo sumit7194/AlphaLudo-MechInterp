@@ -360,6 +360,163 @@ class AlphaLudoV5(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
+class AlphaLudoV63(nn.Module):
+    """
+    V6.3 Architecture — same CNN backbone as AlphaLudoV5 but with 27 input
+    channels (V6.1's 24 + bonus_turn_flag, consecutive_sixes,
+    two_roll_capture_map) and an auxiliary capture-prediction head.
+
+    The aux head is loaded for state_dict compatibility but ignored by the
+    mech interp experiments (we only probe policy and value).
+    """
+    def __init__(self, num_res_blocks=10, num_channels=128, in_channels=27):
+        super().__init__()
+        self.num_channels = num_channels
+
+        self.conv_input = nn.Conv2d(
+            in_channels, num_channels, kernel_size=3, padding=1, bias=False
+        )
+        self.bn_input = nn.BatchNorm2d(num_channels)
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(num_channels) for _ in range(num_res_blocks)
+        ])
+
+        feature_size = num_channels
+        self.policy_fc1 = nn.Linear(feature_size, 64)
+        self.policy_fc2 = nn.Linear(64, 4)
+        self.value_fc1 = nn.Linear(feature_size, 64)
+        self.value_fc2 = nn.Linear(64, 1)
+        # Aux capture head (loaded but unused here)
+        self.aux_capture_fc1 = nn.Linear(feature_size, 64)
+        self.aux_capture_fc2 = nn.Linear(64, 1)
+
+    def _backbone(self, x):
+        out = F.relu(self.bn_input(self.conv_input(x)))
+        for block in self.res_blocks:
+            out = block(out)
+        out = F.adaptive_avg_pool2d(out, 1)
+        return out.flatten(start_dim=1)
+
+    def _apply_legal_mask(self, policy_logits, legal_mask):
+        if legal_mask is not None:
+            all_illegal = (legal_mask.sum(dim=1, keepdim=True) == 0)
+            policy_logits = policy_logits.masked_fill(
+                ~legal_mask.bool(), float('-inf'))
+            if all_illegal.any():
+                policy_logits = torch.where(
+                    all_illegal.expand_as(policy_logits),
+                    torch.zeros_like(policy_logits),
+                    policy_logits,
+                )
+        return policy_logits
+
+    def forward(self, x, legal_mask=None):
+        features = self._backbone(x)
+        p = F.relu(self.policy_fc1(features))
+        policy_logits = self._apply_legal_mask(self.policy_fc2(p), legal_mask)
+        policy = F.softmax(policy_logits, dim=1)
+        v = F.relu(self.value_fc1(features))
+        value = self.value_fc2(v)
+        return policy, value
+
+    def forward_policy_only(self, x, legal_mask=None):
+        features = self._backbone(x)
+        p = F.relu(self.policy_fc1(features))
+        return self._apply_legal_mask(self.policy_fc2(p), legal_mask)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class AlphaLudoV10(nn.Module):
+    """
+    V10 — Slim multi-task CNN (MechInterp-compatible wrapper).
+
+    Real arch: 6 ResBlocks × 96 channels × 28 input channels, 3 heads
+    (policy, win_prob, moves_remaining). MechInterp experiments expect
+    a 2-tuple (policy, value), so this class's `forward()` adapts by
+    deriving value = 2*win_prob - 1 ∈ [-1, 1] from the sigmoid head.
+
+    All three heads are loaded for state_dict compatibility. If an
+    experiment needs the raw 3-tuple, use `forward_full()`.
+    """
+    def __init__(self, num_res_blocks=6, num_channels=96, in_channels=28):
+        super().__init__()
+        self.num_channels = num_channels
+
+        self.conv_input = nn.Conv2d(
+            in_channels, num_channels, kernel_size=3, padding=1, bias=False
+        )
+        self.bn_input = nn.BatchNorm2d(num_channels)
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(num_channels) for _ in range(num_res_blocks)
+        ])
+
+        feature_size = num_channels
+        # Heads use 48-dim hidden layers in V10 (vs V6.3's 64)
+        self.policy_fc1 = nn.Linear(feature_size, 48)
+        self.policy_fc2 = nn.Linear(48, 4)
+        self.win_fc1 = nn.Linear(feature_size, 48)
+        self.win_fc2 = nn.Linear(48, 1)
+        self.moves_fc1 = nn.Linear(feature_size, 48)
+        self.moves_fc2 = nn.Linear(48, 1)
+
+    def _backbone(self, x):
+        out = F.relu(self.bn_input(self.conv_input(x)))
+        for block in self.res_blocks:
+            out = block(out)
+        out = F.adaptive_avg_pool2d(out, 1)
+        return out.flatten(start_dim=1)
+
+    def _apply_legal_mask(self, policy_logits, legal_mask):
+        if legal_mask is not None:
+            all_illegal = (legal_mask.sum(dim=1, keepdim=True) == 0)
+            policy_logits = policy_logits.masked_fill(
+                ~legal_mask.bool(), float('-inf'))
+            if all_illegal.any():
+                policy_logits = torch.where(
+                    all_illegal.expand_as(policy_logits),
+                    torch.zeros_like(policy_logits),
+                    policy_logits,
+                )
+        return policy_logits
+
+    def forward(self, x, legal_mask=None):
+        """MechInterp-compatible forward: returns (policy_probs, value).
+
+        value is derived from win_prob via 2*p - 1 so it lies in [-1, 1]
+        and matches the range the experiments' plotting/metrics expect.
+        """
+        features = self._backbone(x)
+        p = F.relu(self.policy_fc1(features))
+        policy_logits = self._apply_legal_mask(self.policy_fc2(p), legal_mask)
+        policy = F.softmax(policy_logits, dim=1)
+        w = F.relu(self.win_fc1(features))
+        win_prob = torch.sigmoid(self.win_fc2(w))  # keep as (B,1) for compat
+        value = 2.0 * win_prob - 1.0
+        return policy, value
+
+    def forward_full(self, x, legal_mask=None):
+        """Return the native 3-tuple (policy, win_prob, moves_remaining)."""
+        features = self._backbone(x)
+        p = F.relu(self.policy_fc1(features))
+        policy_logits = self._apply_legal_mask(self.policy_fc2(p), legal_mask)
+        policy = F.softmax(policy_logits, dim=1)
+        w = F.relu(self.win_fc1(features))
+        win_prob = torch.sigmoid(self.win_fc2(w)).squeeze(-1)
+        m = F.relu(self.moves_fc1(features))
+        moves_remaining = F.softplus(self.moves_fc2(m)).squeeze(-1)
+        return policy, win_prob, moves_remaining
+
+    def forward_policy_only(self, x, legal_mask=None):
+        features = self._backbone(x)
+        p = F.relu(self.policy_fc1(features))
+        return self._apply_legal_mask(self.policy_fc2(p), legal_mask)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 if __name__ == "__main__":
     model = AlphaLudoV3()
     print(f"AlphaLudo v3 Parameters: {model.count_parameters():,}")

@@ -1,0 +1,80 @@
+{
+  "can_capture_this_turn": {
+    "accuracy": 0.985,
+    "balanced_accuracy": 0.9601731601731602,
+    "baseline": 0.9629629629629629,
+    "class_counts": {
+      "False": 1924,
+      "True": 74
+    },
+    "num_classes": 2
+  },
+  "closest_token_to_home": {
+    "accuracy": 0.7625,
+    "balanced_accuracy": 0.7634898314246141,
+    "baseline": 0.32932932932932935,
+    "class_counts": {
+      "0": 658,
+      "1": 520,
+      "2": 460,
+      "3": 360
+    },
+    "num_classes": 4
+  },
+  "eventual_win": {
+    "accuracy": 0.715,
+    "balanced_accuracy": 0.715186074429772,
+    "baseline": 0.509009009009009,
+    "class_counts": {
+      "False": 981,
+      "True": 1017
+    },
+    "num_classes": 2
+  },
+  "game_phase": {
+    "accuracy": 0.905,
+    "balanced_accuracy": 0.9048741256125389,
+    "baseline": 0.3333333333333333,
+    "class_counts": {
+      "0": 666,
+      "1": 666,
+      "2": 666
+    },
+    "num_classes": 3
+  },
+  "home_stretch_count": {
+    "accuracy": 0.79,
+    "balanced_accuracy": 0.672320634108033,
+    "baseline": 0.7185778668002003,
+    "class_counts": {
+      "0": 1435,
+      "1": 435,
+      "2": 113,
+      "3": 14
+    },
+    "num_classes": 4
+  },
+  "leading_token_in_danger": {
+    "accuracy": 0.805,
+    "balanced_accuracy": 0.8025974025974026,
+    "baseline": 0.9634634634634635,
+    "class_counts": {
+      "False": 1925,
+      "True": 73
+    },
+    "num_classes": 2
+  },
+  "num_tokens_out": {
+    "accuracy": 0.78,
+    "balanced_accuracy": 0.7921670795935197,
+    "baseline": 0.3333333333333333,
+    "class_counts": {
+      "0": 33,
+      "1": 633,
+      "2": 666,
+      "3": 448,
+      "4": 218
+    },
+    "num_classes": 5
+  }
+}

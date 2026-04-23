@@ -16,9 +16,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 from experiments.common import (
     advance_stuck_turn,
     collect_states_stratified,
+    encode_state,
     load_checkpoint_model,
     PHASE_LABELS,
     snapshot_state,
+    IN_CHANNELS,
+    VARIANT,
 )
 import td_ludo_cpp as ludo_cpp
 
@@ -26,25 +29,26 @@ BASE_POS = -1
 HOME_POS = 99
 SAFE_INDICES = {0, 8, 13, 21, 26, 34, 39, 47}
 
-CHANNEL_NAMES = [
-    "0: My Token 0",
-    "1: My Token 1",
-    "2: My Token 2",
-    "3: My Token 3",
-    "4: Opp Density",
-    "5: Safe Zones",
-    "6: My Home Path",
-    "7: Opp Home Path",
-    "8: Score Diff",
-    "9: My Locked %",
-    "10: Opp Locked %",
-    "11: Dice = 1",
-    "12: Dice = 2",
-    "13: Dice = 3",
-    "14: Dice = 4",
-    "15: Dice = 5",
-    "16: Dice = 6",
+# V6 (17ch) → V6.1 (24ch) → V6.3 (27ch) → V10 (28ch, drops V6.3 ch25, adds 2 new)
+_CHANNEL_NAMES_V63 = [
+    "0: My Token 0", "1: My Token 1", "2: My Token 2", "3: My Token 3",
+    "4: Opp Density", "5: Safe Zones", "6: My Home Path", "7: Opp Home Path",
+    "8: Score Diff", "9: My Locked %", "10: Opp Locked %",
+    "11: Dice = 1", "12: Dice = 2", "13: Dice = 3",
+    "14: Dice = 4", "15: Dice = 5", "16: Dice = 6",
+    "17: Opp Token 0", "18: Opp Token 1", "19: Opp Token 2", "20: Opp Token 3",
+    "21: Danger Map", "22: Capture Opp Map", "23: Safe Landing",
+    "24: Bonus Turn Flag", "25: Consec. Sixes", "26: Two-Roll Capture",
 ]
+# V10 drops V6.3 ch25 (consec_sixes, shown dead in V6.3 ablation),
+# shifts two_roll_capture down to ch25, adds 2 new strategic channels.
+_CHANNEL_NAMES_V10 = _CHANNEL_NAMES_V63[:25] + [
+    "25: Two-Roll Capture",
+    "26: Non-Home Token Frac",
+    "27: My Leader Progress",
+]
+CHANNEL_NAMES = (_CHANNEL_NAMES_V10 if VARIANT == "v10"
+                 else _CHANNEL_NAMES_V63)[:IN_CHANNELS]
 
 # All unique pairs of token channels (0-3)
 SWAP_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]

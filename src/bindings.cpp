@@ -194,6 +194,39 @@ PYBIND11_MODULE(td_ludo_cpp, m) {
     return result;
   });
 
+  m.def("encode_state_v6", [](const GameState &state) {
+    py::array_t<float> result({24, BOARD_SIZE, BOARD_SIZE});
+    auto buf = result.mutable_data();
+    write_state_tensor_v6(state, buf);
+    return result;
+  });
+
+  m.def("encode_state_v6_3",
+        [](const GameState &state, int consecutive_sixes) {
+          // Return shape (27, 15, 15) - V6.3 27 Channel Stack
+          py::array_t<float> result({27, BOARD_SIZE, BOARD_SIZE});
+          auto buf = result.mutable_data();
+          write_state_tensor_v6_3(state, buf, consecutive_sixes);
+          return result;
+        },
+        py::arg("state"), py::arg("consecutive_sixes") = 0);
+
+  m.def("encode_state_v10", [](const GameState &state) {
+    // Return shape (28, 15, 15) - V10 Strategic Stack
+    py::array_t<float> result({28, BOARD_SIZE, BOARD_SIZE});
+    auto buf = result.mutable_data();
+    write_state_tensor_v10(state, buf);
+    return result;
+  });
+
+  m.def("encode_state_v9", [](const GameState &state) {
+    // Return shape (14, 15, 15) - V9 14 Channel Stack
+    py::array_t<float> result({14, BOARD_SIZE, BOARD_SIZE});
+    auto buf = result.mutable_data();
+    write_state_tensor_v9(state, buf);
+    return result;
+  });
+
   m.def("get_winner", &get_winner, "Get winner (-1 if none)");
   m.def("create_initial_state", &create_initial_state,
         "Create initial 4-player game state");
@@ -228,10 +261,10 @@ PYBIND11_MODULE(td_ludo_cpp, m) {
       .def("get_root_stats", &MCTSEngine::get_root_stats)
       .def("get_leaf_tensors", [](MCTSEngine &self) {
         std::vector<float> data = self.get_leaf_tensors();
-        // Return shape (batch, 17, 15, 15) - 17 Channel Stack
-        int n_batch = data.size() / (17 * BOARD_SIZE * BOARD_SIZE);
-        return py::array_t<float>({n_batch, 17, BOARD_SIZE, BOARD_SIZE},
-                                  {17 * BOARD_SIZE * BOARD_SIZE * sizeof(float),
+        // Return shape (batch, 24, 15, 15) - V6.1 strategic 24 Channel Stack
+        int n_batch = data.size() / (24 * BOARD_SIZE * BOARD_SIZE);
+        return py::array_t<float>({n_batch, 24, BOARD_SIZE, BOARD_SIZE},
+                                  {24 * BOARD_SIZE * BOARD_SIZE * sizeof(float),
                                    BOARD_SIZE * BOARD_SIZE * sizeof(float),
                                    BOARD_SIZE * sizeof(float), sizeof(float)},
                                   data.data());

@@ -1,32 +1,68 @@
+import os
+
 import numpy as np
 import torch
 
-from src.model import AlphaLudoV5
+from src.model import AlphaLudoV5, AlphaLudoV63, AlphaLudoV10
 
 try:
     import td_ludo_cpp as ludo_cpp
 except ImportError:
     ludo_cpp = None
 
-CHECKPOINT_MODEL_KWARGS = {
-    "num_res_blocks": 10,
-    "num_channels": 128,
-    "in_channels": 17,
+# Which AlphaLudo variant the experiments target. Override via env var.
+# Default preserves original V6 behavior.
+VARIANT = os.environ.get("MECH_INTERP_VARIANT", "v6").lower()
+
+VARIANT_KWARGS = {
+    "v6":   {"num_res_blocks": 10, "num_channels": 128, "in_channels": 17},
+    "v6_1": {"num_res_blocks": 10, "num_channels": 128, "in_channels": 24},
+    "v6_3": {"num_res_blocks": 10, "num_channels": 128, "in_channels": 27},
+    "v10":  {"num_res_blocks": 6,  "num_channels": 96,  "in_channels": 28},
 }
+CHECKPOINT_MODEL_KWARGS = VARIANT_KWARGS[VARIANT]
+
+ENCODER_NAME = {
+    "v6":   "encode_state",
+    "v6_1": "encode_state_v6",
+    "v6_3": "encode_state_v6_3",
+    "v10":  "encode_state_v10",
+}[VARIANT]
+
+IN_CHANNELS = CHECKPOINT_MODEL_KWARGS["in_channels"]
 
 BASE_POS = -1
 HOME_POS = 99
 
 
 def load_checkpoint_model(weights_path, device="cpu"):
-    """Load the exported AlphaLudo checkpoint with the correct architecture."""
-    print(f"Loading model from {weights_path} on {device}...")
-    checkpoint = torch.load(weights_path, map_location=device)
-    model = AlphaLudoV5(**CHECKPOINT_MODEL_KWARGS)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    """Load a checkpoint matching the active VARIANT (default 'v6')."""
+    print(f"Loading {VARIANT} model from {weights_path} on {device}...")
+    checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+    if VARIANT == "v10":
+        model = AlphaLudoV10(**CHECKPOINT_MODEL_KWARGS)
+    elif VARIANT == "v6_3":
+        model = AlphaLudoV63(**CHECKPOINT_MODEL_KWARGS)
+    else:
+        model = AlphaLudoV5(**CHECKPOINT_MODEL_KWARGS)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     return model
+
+
+def encode_state(game, consecutive_sixes=0):
+    """Encode a GameState using the variant-correct C++ encoder."""
+    if ludo_cpp is None:
+        raise RuntimeError("td_ludo_cpp not available")
+    if VARIANT == "v10":
+        return ludo_cpp.encode_state_v10(game)
+    if VARIANT == "v6_3":
+        return ludo_cpp.encode_state_v6_3(game, consecutive_sixes)
+    if VARIANT == "v6_1":
+        return ludo_cpp.encode_state_v6(game)
+    return ludo_cpp.encode_state(game)
 
 
 def advance_stuck_turn(game):
