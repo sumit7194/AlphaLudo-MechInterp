@@ -1,0 +1,6 @@
+
+--- STDERR ---
+Traceback (most recent call last):
+  File "/Users/sumit/Github/AlphaLudo-MechInterp/experiments/01_channel_ablation/run_ablation.py", line 9, in <module>
+    import matplotlib
+ModuleNotFoundError: No module named 'matplotlib'

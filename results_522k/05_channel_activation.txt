@@ -1,0 +1,6 @@
+
+--- STDERR ---
+Traceback (most recent call last):
+  File "/Users/sumit/Github/AlphaLudo-MechInterp/experiments/05_channel_activation/run_channel_activation.py", line 33, in <module>
+    import matplotlib
+ModuleNotFoundError: No module named 'matplotlib'

@@ -1,0 +1,6 @@
+
+--- STDERR ---
+Traceback (most recent call last):
+  File "/Users/sumit/Github/AlphaLudo-MechInterp/experiments/06_cka_similarity/run_cka_similarity.py", line 33, in <module>
+    import matplotlib
+ModuleNotFoundError: No module named 'matplotlib'

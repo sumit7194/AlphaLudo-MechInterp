@@ -1,0 +1,6 @@
+
+--- STDERR ---
+Traceback (most recent call last):
+  File "/Users/sumit/Github/AlphaLudo-MechInterp/experiments/03_linear_probes/run_linear_probes.py", line 10, in <module>
+    from sklearn.linear_model import LogisticRegression
+ModuleNotFoundError: No module named 'sklearn'
