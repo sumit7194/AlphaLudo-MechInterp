@@ -274,7 +274,12 @@ def collect_labeled_dataset(
                 game.current_dice_roll = int(rng.integers(1, 7))
 
         legal_moves_batch = env.get_legal_moves()
-        states_tensor = env.get_state_tensor()
+        # VectorGameState.get_state_tensor() is V6.1 17ch only — re-encode for V10/V12.
+        from experiments.common import IN_CHANNELS as _IN_CH, encode_state as _enc, ludo_cpp as _cpp_unused
+        if _IN_CH == 17:
+            states_tensor = env.get_state_tensor()
+        else:
+            states_tensor = np.array([np.asarray(_enc(env.get_game(_i))) for _i in range(num_games)], dtype=np.float32)
 
         actions = []
         for game_idx in range(num_games):

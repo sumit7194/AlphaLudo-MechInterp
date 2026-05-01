@@ -3,7 +3,7 @@ import os
 import numpy as np
 import torch
 
-from src.model import AlphaLudoV5, AlphaLudoV63, AlphaLudoV10
+from src.model import AlphaLudoV5, AlphaLudoV63, AlphaLudoV10, AlphaLudoV12
 
 try:
     import td_ludo_cpp as ludo_cpp
@@ -19,6 +19,11 @@ VARIANT_KWARGS = {
     "v6_1": {"num_res_blocks": 10, "num_channels": 128, "in_channels": 24},
     "v6_3": {"num_res_blocks": 10, "num_channels": 128, "in_channels": 27},
     "v10":  {"num_res_blocks": 6,  "num_channels": 96,  "in_channels": 28},
+    # V12 = CNN backbone (4 ResBlocks × 96ch) + 2 Transformer attention layers
+    # over 8 game-piece tokens. Same input as V10 (28 channels). Trained
+    # 22h on L4 → best 81.0% / final 79.4%. See AlphaLudo training_journal.md.
+    "v12":  {"num_res_blocks": 4,  "num_channels": 96,  "in_channels": 28,
+              "num_attn_layers": 2, "num_heads": 4, "ffn_ratio": 4, "dropout": 0.0},
 }
 CHECKPOINT_MODEL_KWARGS = VARIANT_KWARGS[VARIANT]
 
@@ -27,6 +32,7 @@ ENCODER_NAME = {
     "v6_1": "encode_state_v6",
     "v6_3": "encode_state_v6_3",
     "v10":  "encode_state_v10",
+    "v12":  "encode_state_v10",   # V12 reuses V10's 28-channel encoder
 }[VARIANT]
 
 IN_CHANNELS = CHECKPOINT_MODEL_KWARGS["in_channels"]
@@ -35,20 +41,60 @@ BASE_POS = -1
 HOME_POS = 99
 
 
+class _V12TwoOutputAdapter(torch.nn.Module):
+    """Adapt V12's 3-output forward (policy, win_prob, moves_remaining) to
+    the 2-tuple (policy, value) shape every existing experiment unpacks.
+    win_prob is exposed as the 'value' channel because it is the closest
+    semantic match (sigmoid-bounded win-rate prediction)."""
+
+    def __init__(self, inner: torch.nn.Module):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, x, legal_mask=None):
+        policy, win_prob, _moves = self.inner(x, legal_mask)
+        return policy, win_prob
+
+    def _backbone(self, x):
+        """Compatibility alias for V5/V6.3/V10 experiments. V12's combined
+        feature is concat([CNN GAP, mean of attended tokens]) → shape (B, 2C).
+        For probes we expose this 192-dim vector."""
+        return self.inner._build_features(x)
+
+    # Pass-through attributes so existing hook-based experiments
+    # (residual block iteration, layer knockout, etc.) still work.
+    def __getattr__(self, name):
+        # nn.Module's __getattr__ is special; only fall through to inner
+        # for names we didn't define and that aren't a Module child.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.inner, name)
+
+
 def load_checkpoint_model(weights_path, device="cpu"):
     """Load a checkpoint matching the active VARIANT (default 'v6')."""
     print(f"Loading {VARIANT} model from {weights_path} on {device}...")
     checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
-    if VARIANT == "v10":
+    if VARIANT == "v12":
+        model = AlphaLudoV12(**CHECKPOINT_MODEL_KWARGS)
+    elif VARIANT == "v10":
         model = AlphaLudoV10(**CHECKPOINT_MODEL_KWARGS)
     elif VARIANT == "v6_3":
         model = AlphaLudoV63(**CHECKPOINT_MODEL_KWARGS)
     else:
         model = AlphaLudoV5(**CHECKPOINT_MODEL_KWARGS)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
+    if any(k.startswith("_orig_mod.") for k in state_dict):
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
+    if VARIANT == "v12":
+        # V12 returns (policy, win_prob, moves_remaining). Existing experiments
+        # unpack (policy, value) — wrap to drop the auxiliary moves_remaining.
+        model = _V12TwoOutputAdapter(model)
+        model.eval()
     return model
 
 
@@ -56,7 +102,8 @@ def encode_state(game, consecutive_sixes=0):
     """Encode a GameState using the variant-correct C++ encoder."""
     if ludo_cpp is None:
         raise RuntimeError("td_ludo_cpp not available")
-    if VARIANT == "v10":
+    if VARIANT in ("v10", "v12"):
+        # V12 reuses V10's 28-channel encoder.
         return ludo_cpp.encode_state_v10(game)
     if VARIANT == "v6_3":
         return ludo_cpp.encode_state_v6_3(game, consecutive_sixes)
@@ -135,10 +182,20 @@ def has_multiple_legal_tokens(sample):
 # ── Stratified state collection ─────────────────────────────────────────────
 
 
-def snapshot_state(game, state_tensor):
-    """Snapshot a game into a dict suitable for offline analysis."""
+def snapshot_state(game, state_tensor=None):
+    """Snapshot a game into a dict suitable for offline analysis.
+
+    `state_tensor` is treated as a hint: VectorGameState.get_state_tensor()
+    is hardcoded to the V6.1 17-channel encoder. For variants > V6.1 the
+    hint is ignored and we re-encode using the variant's encoder so the
+    saved tensor matches the model's expected input shape.
+    """
+    if state_tensor is None or state_tensor.shape[0] != IN_CHANNELS:
+        tensor = np.asarray(encode_state(game)).copy()
+    else:
+        tensor = state_tensor.copy()
     return {
-        "tensor": state_tensor.copy(),
+        "tensor": tensor,
         "player_positions": np.array(game.player_positions, dtype=np.int8).copy(),
         "scores": np.array(game.scores, dtype=np.int8).copy(),
         "active_players": np.array(game.active_players, dtype=bool).copy(),
@@ -188,7 +245,14 @@ def collect_states_stratified(
                 game.current_dice_roll = int(rng.integers(1, 7))
 
         legal_moves_batch = env.get_legal_moves()
-        states_tensor = env.get_state_tensor()
+        # VectorGameState.get_state_tensor() is V6.1 17ch only. For variants
+        # with different channel counts (V10/V12 = 28ch), re-encode per game.
+        if IN_CHANNELS == 17:
+            states_tensor = env.get_state_tensor()
+        else:
+            states_tensor = np.array([
+                np.asarray(encode_state(env.get_game(i))) for i in range(num_games)
+            ], dtype=np.float32)
 
         actions = []
         for i in range(num_games):

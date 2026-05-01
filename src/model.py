@@ -540,3 +540,6 @@ if __name__ == "__main__":
     logits = model5.forward_policy_only(x, legal_mask)
     print(f"Policy logits: {logits.shape}")
 
+
+# V12: token-entity attention (added 2026-04-28 for V12.1 mech-interp work)
+from .v12 import AlphaLudoV12  # noqa: E402,F401

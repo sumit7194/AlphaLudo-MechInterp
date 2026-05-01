@@ -47,7 +47,7 @@ _CHANNEL_NAMES_V10 = _CHANNEL_NAMES_V63[:25] + [
     "26: Non-Home Token Frac",
     "27: My Leader Progress",
 ]
-CHANNEL_NAMES = (_CHANNEL_NAMES_V10 if VARIANT == "v10"
+CHANNEL_NAMES = (_CHANNEL_NAMES_V10 if VARIANT in ("v10", "v12")
                  else _CHANNEL_NAMES_V63)[:IN_CHANNELS]
 
 # All unique pairs of token channels (0-3)
@@ -131,8 +131,16 @@ def load_model(weights_path):
 # ── Legacy helper (kept for snapshot inside bucket collection) ───────────────
 
 def _snapshot_state_local(game, state_tensor):
+    # VectorGameState.get_state_tensor() is hardcoded to V6.1 17ch encoder.
+    # If the active variant uses a different encoder (V10 → 28ch, V12 → 28ch
+    # via V10 encoder, etc.), re-encode with the correct one.
+    from experiments.common import IN_CHANNELS, encode_state
+    if state_tensor is None or state_tensor.shape[0] != IN_CHANNELS:
+        tensor = np.asarray(encode_state(game)).copy()
+    else:
+        tensor = state_tensor.copy()
     return {
-        "tensor": state_tensor.copy(),
+        "tensor": tensor,
         "player_positions": np.array(game.player_positions, dtype=np.int8).copy(),
         "scores": np.array(game.scores, dtype=np.int8).copy(),
         "active_players": np.array(game.active_players, dtype=bool).copy(),
@@ -315,7 +323,15 @@ def collect_states(
                 game.current_dice_roll = int(rng.integers(1, 7))
 
         legal_moves_batch = env.get_legal_moves()
-        states_tensor = env.get_state_tensor()
+        # VectorGameState.get_state_tensor() is hardcoded to V6.1 17ch.
+        # Use the variant's encoder for V10/V12 (28ch) compatibility.
+        from experiments.common import IN_CHANNELS, encode_state
+        if IN_CHANNELS == 17:
+            states_tensor = env.get_state_tensor()
+        else:
+            states_tensor = np.array([
+                np.asarray(encode_state(env.get_game(i))) for i in range(num_games)
+            ], dtype=np.float32)
 
         actions = []
         for i in range(num_games):
@@ -421,7 +437,15 @@ def collect_buckets_only(
                 game.current_dice_roll = int(rng.integers(1, 7))
 
         legal_moves_batch = env.get_legal_moves()
-        states_tensor = env.get_state_tensor()
+        # VectorGameState.get_state_tensor() is hardcoded to V6.1 17ch.
+        # Use the variant's encoder for V10/V12 (28ch) compatibility.
+        from experiments.common import IN_CHANNELS, encode_state
+        if IN_CHANNELS == 17:
+            states_tensor = env.get_state_tensor()
+        else:
+            states_tensor = np.array([
+                np.asarray(encode_state(env.get_game(i))) for i in range(num_games)
+            ], dtype=np.float32)
 
         actions = []
         for i in range(num_games):
